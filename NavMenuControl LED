@@ -1,0 +1,255 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <AiEsp32RotaryEncoder.h>
+
+// ========== OLED DISPLAY SETUP ==========
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+#define I2C_SDA 9
+#define I2C_SCL 8
+
+TwoWire I2Cone = TwoWire(0);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &I2Cone, OLED_RESET);
+
+// ========== ROTARY ENCODER SETUP ==========
+#define ROTARY_ENCODER_A_PIN 4 //CLK
+#define ROTARY_ENCODER_B_PIN 5 //DT
+#define ROTARY_ENCODER_BUTTON_PIN 6 //SW
+#define ROTARY_ENCODER_VCC_PIN -1
+#define ROTARY_ENCODER_STEPS 4
+
+AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(
+  ROTARY_ENCODER_A_PIN,
+  ROTARY_ENCODER_B_PIN,
+  ROTARY_ENCODER_BUTTON_PIN,
+  ROTARY_ENCODER_VCC_PIN,
+  ROTARY_ENCODER_STEPS
+);
+
+// ========== LED SETUP ==========
+#define LED_PIN 2  // GPIO 2 for the LED
+
+// LED modes
+enum LedMode {
+  MODE_OFF,
+  MODE_ON,
+  MODE_BLINK
+};
+
+LedMode currentMode = MODE_OFF;
+unsigned long lastBlinkTime = 0;
+const int blinkInterval = 500;  // Blink every 500ms
+
+// ========== MENU SETUP ==========
+int menuPosition = 0;
+int menuItems = 3;  // Changed to 3 LED options
+String menuOptions[] = {"LED OFF", "LED ON", "LED BLINK"};
+
+// ========== INTERRUPT SERVICE ROUTINE ==========
+void IRAM_ATTR readEncoderISR() {
+  rotaryEncoder.readEncoder_ISR();
+}
+
+// ========== LED CONTROL FUNCTIONS ==========
+void updateLED() {
+  switch(currentMode) {
+    case MODE_OFF:
+      digitalWrite(LED_PIN, LOW);
+      break;
+    case MODE_ON:
+      digitalWrite(LED_PIN, HIGH);
+      break;
+    case MODE_BLINK:
+      // Blinking is handled in the main loop
+      break;
+  }
+}
+
+void handleBlink() {
+  if(currentMode == MODE_BLINK) {
+    unsigned long currentTime = millis();
+    if(currentTime - lastBlinkTime >= blinkInterval) {
+      lastBlinkTime = currentTime;
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));  // Toggle LED
+    }
+  }
+}
+
+// ========== DISPLAY FUNCTIONS ==========
+void resetDisplaySettings() {
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+}
+
+void updateDisplay() {
+  display.clearDisplay();
+  resetDisplaySettings();
+  
+  // Title bar
+  display.fillRect(0, 0, SCREEN_WIDTH, 16, SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK);
+  display.setCursor(2, 4);
+  display.println("LED CONTROL");
+  
+  // Menu items
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  
+  // Show current LED mode indicator
+  display.setCursor(90, 4);
+  display.setTextColor(SSD1306_BLACK);
+  switch(currentMode) {
+    case MODE_OFF: display.print("OFF"); break;
+    case MODE_ON: display.print("ON"); break;
+    case MODE_BLINK: display.print("BLINK"); break;
+  }
+  display.setTextColor(SSD1306_WHITE);
+  
+  for(int i = 0; i < menuItems; i++) {
+    int yPos = 18 + (i * 12);
+    
+    if(i == menuPosition) {
+      display.setCursor(2, yPos);
+      display.print(">");
+      display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    
+    display.setCursor(12, yPos);
+    display.println(menuOptions[i]);
+    
+    // Show current mode indicator
+    if((i == 0 && currentMode == MODE_OFF) ||
+       (i == 1 && currentMode == MODE_ON) ||
+       (i == 2 && currentMode == MODE_BLINK)) {
+      display.setCursor(100, yPos);
+      display.print("*");
+    }
+    
+    if(i == menuPosition) {
+      display.setTextColor(SSD1306_WHITE);
+    }
+  }
+  
+  // Footer
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, SCREEN_HEIGHT - 8);
+  display.print("Turn:Select");
+  display.setCursor(80, SCREEN_HEIGHT - 8);
+  display.print("Push:Apply");
+  
+  display.display();
+}
+
+void showConfirmation(String mode) {
+  display.clearDisplay();
+  resetDisplaySettings();
+  display.setCursor(0, 20);
+  display.println("LED Mode Set To:");
+  
+  display.setTextSize(2);
+  display.setCursor(0, 40);
+  display.println(mode);
+  display.display();
+  
+  delay(800);  // Shorter delay for better UX
+  updateDisplay();
+}
+
+// ========== HANDLE MENU SELECTION ==========
+void handleMenuSelection() {
+  String selectedMode = menuOptions[menuPosition];
+  
+  switch(menuPosition) {
+    case 0:  // LED OFF
+      currentMode = MODE_OFF;
+      updateLED();
+      showConfirmation("OFF");
+      break;
+    case 1:  // LED ON
+      currentMode = MODE_ON;
+      updateLED();
+      showConfirmation("ON");
+      break;
+    case 2:  // LED BLINK
+      currentMode = MODE_BLINK;
+      lastBlinkTime = millis();  // Reset blink timer
+      digitalWrite(LED_PIN, LOW);  // Start with LED off
+      showConfirmation("BLINK");
+      break;
+  }
+  
+  Serial.print("LED Mode changed to: ");
+  Serial.println(selectedMode);
+}
+
+// ========== SETUP ==========
+void setup() {
+  Serial.begin(115200);
+  Serial.println("ESP32-C3 LED Controller Starting...");
+  
+  // ----- LED Setup -----
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);  // Start with LED off
+  Serial.println("LED on GPIO2 - Ready");
+  
+  // ----- Encoder Setup with Pull-ups -----
+  pinMode(ROTARY_ENCODER_A_PIN, INPUT_PULLUP);
+  pinMode(ROTARY_ENCODER_B_PIN, INPUT_PULLUP);
+  pinMode(ROTARY_ENCODER_BUTTON_PIN, INPUT_PULLUP);
+  
+  // ----- OLED Setup -----
+  I2Cone.begin(I2C_SDA, I2C_SCL, 400000);
+  
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed!"));
+    for(;;);
+  }
+  
+  // Splash screen
+  display.clearDisplay();
+  resetDisplaySettings();
+  display.println("LED Controller");
+  display.println("GPIO9=SDA, GPIO8=SCL");
+  display.println("Encoder: 4,5,6");
+  display.println("LED: GPIO2");
+  display.display();
+  delay(2000);
+  
+  // ----- Rotary Encoder Setup -----
+  rotaryEncoder.begin();
+  rotaryEncoder.setup(readEncoderISR);
+  rotaryEncoder.setBoundaries(0, menuItems - 1, false);
+  rotaryEncoder.setEncoderValue(0);
+  
+  updateDisplay();
+  Serial.println("System Ready - Use encoder to control LED");
+}
+
+// ========== MAIN LOOP ==========
+void loop() {
+  // Handle LED blinking (non-blocking)
+  handleBlink();
+  
+  // Handle encoder rotation
+  if(rotaryEncoder.encoderChanged()) {
+    menuPosition = rotaryEncoder.readEncoder();
+    updateDisplay();
+    Serial.print("Menu position: ");
+    Serial.println(menuPosition);
+  }
+  
+  // Handle encoder button press (apply selected mode)
+  if(rotaryEncoder.isEncoderButtonClicked()) {
+    Serial.print("Applying: ");
+    Serial.println(menuOptions[menuPosition]);
+    handleMenuSelection();
+  }
+  
+  delay(5);
+}
